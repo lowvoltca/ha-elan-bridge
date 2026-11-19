@@ -1,0 +1,18 @@
+name: Release
+
+# Publishing a GitHub release whose tag (v0.7.0) doesn't match manifest.json's version fails here,
+# so HACS never offers a mismatched update.
+on:
+  release:
+    types: [published]
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          want="${GITHUB_REF_NAME#v}"
+          have=$(python3 -c 'import json; print(json.load(open("custom_components/elan_bridge/manifest.json"))["version"])')
+          echo "tag $want, manifest $have"
+          test "$want" = "$have"

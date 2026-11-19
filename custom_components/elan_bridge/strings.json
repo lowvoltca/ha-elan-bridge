@@ -1,0 +1,60 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "ELAN controller",
+        "description": "The address of the ELAN controller running the HA Bridge driver, and the driver's port (10010 unless you changed it). The driver opens its port about a minute after ELAN starts.",
+        "data": {
+          "host": "Controller IP address",
+          "port": "HA Bridge port"
+        }
+      },
+      "entities": {
+        "title": "What to show in ELAN",
+        "description": "Lights and switches become ELAN lighting devices (dimmable lights as dimmers). Each media player needs its own \"HA Media Player\" source in ELAN: after this step, open the integration's options to see which port to set on each one.",
+        "data": {
+          "entities": "Lights and switches",
+          "media": "Media players",
+          "cameras": "Cameras (detections become ELAN events)",
+          "nvr_cameras": "Protect cameras for ELAN NVR playback",
+          "security_sensors": "Door, window and motion sensors (ELAN security zones)",
+          "security_panel": "Alarm panel armed and disarmed from ELAN (optional)",
+          "doorbell": "Doorbell that rings ELAN's touchpanels (optional)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "The HA Bridge driver didn't answer on that address and port. Check it shows \"Listening on port 10010\" in Configurator."
+    },
+    "abort": {
+      "already_configured": "This controller is already set up."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "What to show in ELAN",
+        "description": "New lights and switches are added to ELAN on the next connection; removing one stops updates, but its ELAN device stays until you delete it in Configurator.\n\nMedia players: in Configurator add one \"HA Media Player\" source per player (Media → Sources), set its Port to the number below and click Apply. New players get their port after you save; reopen these options to see it.\n\nCameras: add one \"HA Camera Events\" driver per camera in Configurator, set its Port to the number below, Apply; its detections (Person, Vehicle, Doorbell, Motion, ...) then appear as events in Event Mapper.\n\nNVR playback: the cameras chosen below are served to ELAN as an \"ELAN EL-NVR\" at this Home Assistant's address (Video → NVR/DVR Systems). Add each camera in Configurator as an \"ONVIF Video Source\" at this address with its ONVIF port below, give it the same name as in Protect, then pick it on an EL-NVR channel.\n\nSecurity: install the \"HA Security System\" driver in Configurator (Security → Security Panels), set its Port to 10040, any IP, Apply. The sensors chosen below become its zones (zone numbers listed below); the alarm panel, if chosen, is armed (Away = Arm away, Stay = Arm home) and disarmed from ELAN.\n\nDoorbell: Home Assistant calls ELAN as a SIP door station when it is pressed, and sends its video and audio when a touchpanel answers. Once only: in Configurator set Messaging → Communication Devices → ELAN SIP Server → Enrollment Mode to Open, save here, wait for a \"SIP Station\" to appear, then set Enrollment Mode back to Closed.\n\n{ports}",
+        "data": {
+          "entities": "Lights and switches",
+          "media": "Media players",
+          "cameras": "Cameras (detections become ELAN events)",
+          "nvr_cameras": "Protect cameras for ELAN NVR playback",
+          "security_sensors": "Door, window and motion sensors (ELAN security zones)",
+          "security_panel": "Alarm panel armed and disarmed from ELAN (optional)",
+          "doorbell": "Doorbell that rings ELAN's touchpanels (optional)"
+        }
+      },
+      "live": {
+        "title": "ELAN live view streams",
+        "description": "Pick the stream each camera's live view in ELAN uses. Automatic picks Protect's largest stream up to 1280 wide; for a camera Protect doesn't re-share (a third-party camera), it uses the camera's own Home Assistant integration, substream first. ELAN plays about 720p or smaller live.\n\nIf a stream needs the camera's login (a third-party camera), enter that username and password on the camera's page in ELAN Configurator; the link ELAN gets doesn't carry it."
+      }
+    }
+  },
+  "services": {
+    "ring_doorbell": {
+      "name": "Ring ELAN",
+      "description": "Call ELAN's touchpanels from the doorbell, as if it was pressed."
+    }
+  }
+}

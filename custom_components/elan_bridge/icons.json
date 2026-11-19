@@ -1,0 +1,7 @@
+{
+  "services": {
+    "ring_doorbell": {
+      "service": "mdi:doorbell-video"
+    }
+  }
+}
