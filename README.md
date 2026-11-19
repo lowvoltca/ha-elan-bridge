@@ -79,6 +79,8 @@ door station when it's pressed, and sends its video and audio when a panel answe
 
 To test without pressing the doorbell, call the action `elan_bridge.ring_doorbell`.
 
+The picture on the panels comes from ELAN's own camera link: set the SIP Station's *Video Stream Override* and *Video Preview Source* to the doorbell's camera in Configurator. Home Assistant sends the doorbell's audio.
+
 ## ELAN drivers
 
 The ELAN-side drivers are ELAN driver packages (`.EDRVC`) that must be installed on the controller through
@@ -92,6 +94,7 @@ supports. Until then, open an issue if you'd like to help test them.
 - **Cameras show authorization errors in ELAN**: they were added with the dynamic ONVIF driver. Re-add them as
   **ONVIF Video Source (Static)**.
 - **No video in the NVR or the doorbell call**: turn on RTSP for that camera in UniFi Protect.
+- **Doorbell call has no sound**: on the ELAN Viewer, turn the microphone on. With it off, the Viewer joins no audio at all, not even the door's.
 - **Doorbell never appears in Configurator**: Enrollment Mode must be Open while Home Assistant registers.
   Home Assistant needs UDP 5062 free, and the controller must be able to reach it.
 - To see what's happening, add this to `configuration.yaml`:

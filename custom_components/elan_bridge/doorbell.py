@@ -5,10 +5,11 @@ from __future__ import annotations
 
 import logging
 
-from homeassistant.const import STATE_ON
-from homeassistant.core import Event, HomeAssistant, ServiceCall, callback
+from homeassistant.const import STATE_OFF, STATE_ON
+from homeassistant.core import CoreState, Event, HomeAssistant, ServiceCall, callback
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .nvr import PREFERRED_LIVE_WIDTH, _ffmpeg_binary, _protect_camera, _split_login, async_protect_streams
@@ -16,6 +17,7 @@ from .sip_door import DoorStation
 
 _LOGGER = logging.getLogger(__name__)
 SERVICE_RING = "ring_doorbell"
+FRESH_PRESS = 30      # seconds: an event entity's ring time older than this is a restored value, not a press
 
 
 def ring_entities(hass: HomeAssistant, device_id: str) -> list:
@@ -69,13 +71,16 @@ async def async_setup_doorbell(hass: HomeAssistant, controller: str, device_id: 
     @callback
     def on_press(event: Event) -> None:
         new, old = event.data.get("new_state"), event.data.get("old_state")
-        if new is None:
+        if new is None or hass.state is not CoreState.running:     # starting or stopping
             return
+        # Restarts and reloads recreate these entities (unavailable/unknown/restored values): only a real press counts.
         if new.domain == "binary_sensor":
-            pressed = new.state == STATE_ON and (old is None or old.state != STATE_ON)
-        else:   # event entity: its state is the time of the last event
-            pressed = (old is not None and new.state != old.state and old.state not in ("unavailable",)
-                       and new.attributes.get("event_type", "ring") == "ring")
+            pressed = new.state == STATE_ON and old is not None and old.state == STATE_OFF
+        else:   # event entity: its state is the time of the last event, so it must be a fresh one
+            when = dt_util.parse_datetime(new.state)
+            pressed = (old is not None and new.state != old.state and when is not None
+                       and abs((dt_util.utcnow() - when).total_seconds()) < FRESH_PRESS
+                       and new.attributes.get("event_type") == "ring")
         if pressed:
             _LOGGER.info("ELAN doorbell: %s pressed (%s)", name, new.entity_id)
             hass.async_create_task(station.ring())

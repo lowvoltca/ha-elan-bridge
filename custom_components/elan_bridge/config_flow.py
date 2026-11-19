@@ -8,6 +8,7 @@ import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlowWithReload
 from homeassistant.core import callback
+from homeassistant.data_entry_flow import section
 from homeassistant.helpers import selector
 
 from . import protocol as p
@@ -59,6 +60,8 @@ async def _answers(host: str, port: int) -> bool:
 SECURITY_CLASSES = ["door", "window", "garage_door", "opening", "motion", "occupancy", "presence", "vibration",
                     "moisture", "smoke", "gas", "carbon_monoxide", "tamper", "safety"]
 
+SECTION_DOORBELL = "doorbell_sip"     # form section; its fields are flattened into the options
+
 
 def _entities_schema(default: list, media_default: list, camera_default: list = (), nvr_default: list = (),
                      sec_default: list = (), panel_default: str | None = None,
@@ -77,9 +80,11 @@ def _entities_schema(default: list, media_default: list, camera_default: list = 
             selector.EntitySelectorConfig(domain="binary_sensor", device_class=SECURITY_CLASSES, multiple=True)),
         vol.Optional(CONF_SECURITY_PANEL, description={"suggested_value": panel_default}): selector.EntitySelector(
             selector.EntitySelectorConfig(domain="alarm_control_panel")),
-        vol.Optional(CONF_DOORBELL, description={"suggested_value": doorbell_default}): selector.DeviceSelector(
-            selector.DeviceSelectorConfig(integration="unifiprotect",
-                                          entity=selector.EntityFilterSelectorConfig(domain="camera"))),
+        vol.Required(SECTION_DOORBELL): section(vol.Schema({
+            vol.Optional(CONF_DOORBELL, description={"suggested_value": doorbell_default}): selector.DeviceSelector(
+                selector.DeviceSelectorConfig(integration="unifiprotect",
+                                              entity=selector.EntityFilterSelectorConfig(domain="camera"))),
+        }), {"collapsed": False}),
     })
 
 
@@ -97,7 +102,7 @@ def _options(user_input: dict, old: dict) -> dict:
             CONF_SECURITY_SENSORS: user_input.get(CONF_SECURITY_SENSORS, []),
             CONF_SECURITY_ZONES: assign_zones(user_input.get(CONF_SECURITY_SENSORS, []), old.get(CONF_SECURITY_ZONES, {})),
             CONF_SECURITY_PANEL: user_input.get(CONF_SECURITY_PANEL) or None,
-            CONF_DOORBELL: user_input.get(CONF_DOORBELL) or None}
+            CONF_DOORBELL: user_input.get(SECTION_DOORBELL, {}).get(CONF_DOORBELL) or None}
 
 
 def _ports_text(options: dict, device_name=lambda device_id: device_id) -> str:

@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import struct
 import time
 
 _LOGGER = logging.getLogger(__name__)
@@ -54,9 +55,10 @@ def sdp_media(sdp: str) -> dict:
     return out
 
 
-def media_command(ffmpeg: str, source: str, audio: tuple | None, video: tuple | None) -> list:
-    """ffmpeg arguments that send the doorbell's H.264 (copied, SPS/PPS repeated in-band) and its audio as PCMU."""
-    cmd = [ffmpeg, "-nostdin", "-loglevel", "warning"]
+def media_command(ffmpeg: str, source: str, audio: bool, video: tuple | None) -> list:
+    """ffmpeg arguments: the doorbell's H.264 (copied, SPS/PPS repeated in-band) as RTP to `video`, and its audio
+    as raw 8 kHz mu-law on stdout, which RtpAudio sends."""
+    cmd = [ffmpeg, "-nostdin", "-nostats", "-loglevel", "info"]   # info: stream mapping in the debug log
     if source.startswith("rtsp"):
         cmd += ["-rtsp_transport", "tcp"]
     cmd += ["-i", source]
@@ -64,9 +66,73 @@ def media_command(ffmpeg: str, source: str, audio: tuple | None, video: tuple | 
         cmd += ["-map", "0:v:0", "-c:v", "copy", "-bsf:v", "dump_extra", "-f", "rtp", "-payload_type", "96",
                 f"rtp://{video[0]}:{video[1]}?localrtpport={RTP_VIDEO}&pkt_size=1200"]
     if audio:
-        cmd += ["-map", "0:a:0?", "-c:a", "pcm_mulaw", "-ar", "8000", "-ac", "1", "-f", "rtp", "-payload_type", "0",
-                f"rtp://{audio[0]}:{audio[1]}?localrtpport={RTP_AUDIO}"]
+        cmd += ["-map", "0:a:0?", "-c:a", "pcm_mulaw", "-ar", "8000", "-ac", "1", "-f", "mulaw", "pipe:1"]
     return cmd
+
+
+class RtpAudio(asyncio.DatagramProtocol):
+    """The call's audio, both ways on one port (symmetric RTP): 20 ms PCMU packets to ELAN, silence until the
+    doorbell's sound arrives. Replies go wherever ELAN's own audio comes from, and both directions are counted."""
+
+    FRAME = 160                  # 20 ms of 8 kHz mu-law
+    MAX_BACKLOG = 160 * 10       # keep at most 200 ms queued, so the sound stays live
+
+    def __init__(self, remote: tuple) -> None:
+        self.remote = remote
+        self.transport = None
+        self.buffer = bytearray()
+        self.sent = self.received = 0
+        self.source = None
+        self._seq, self._ts, self._ssrc = random.getrandbits(16), random.getrandbits(32), random.getrandbits(32)
+        self._task = None
+
+    async def start(self) -> None:
+        loop = asyncio.get_running_loop()
+        await loop.create_datagram_endpoint(lambda: self, local_addr=("0.0.0.0", RTP_AUDIO))
+        self._task = asyncio.ensure_future(self._pace())
+
+    def connection_made(self, transport) -> None:
+        self.transport = transport
+
+    def datagram_received(self, data: bytes, addr) -> None:
+        self.received += 1
+        if self.source is None:
+            self.source = addr
+            _LOGGER.debug("ELAN doorbell: ELAN's audio comes from %s:%s (sending to %s:%s)", *addr, *self.remote)
+            if addr != self.remote:
+                self.remote = addr
+
+    def feed(self, data: bytes) -> None:
+        self.buffer += data
+        if len(self.buffer) > self.MAX_BACKLOG:
+            del self.buffer[:len(self.buffer) - self.FRAME * 2]
+
+    async def _pace(self) -> None:
+        loop = asyncio.get_running_loop()
+        due = loop.time()
+        while self.transport:
+            if len(self.buffer) >= self.FRAME:
+                payload = bytes(self.buffer[:self.FRAME])
+                del self.buffer[:self.FRAME]
+            else:
+                payload = b"\xff" * self.FRAME          # mu-law silence
+            header = struct.pack("!BBHII", 0x80, (0x80 if self.sent == 0 else 0), self._seq & 0xFFFF,
+                                 self._ts & 0xFFFFFFFF, self._ssrc)
+            self.transport.sendto(header + payload, self.remote)
+            self.sent += 1
+            self._seq += 1
+            self._ts += self.FRAME
+            due += 0.02
+            await asyncio.sleep(max(0.0, due - loop.time()))
+
+    def close(self) -> None:
+        if self._task:
+            self._task.cancel()
+        if self.transport:
+            self.transport.close()
+            self.transport = None
+        _LOGGER.debug("ELAN doorbell audio: sent %s packets, received %s from %s", self.sent, self.received,
+                      self.source)
 
 
 class DoorStation(asyncio.DatagramProtocol):
@@ -88,6 +154,7 @@ class DoorStation(asyncio.DatagramProtocol):
         self._tasks: set = set()
         self._call = None                    # dict while a call is in progress
         self._proc = None
+        self._audio = None
 
     # ------------------------------------------------------------------ lifecycle
     async def start(self) -> None:
@@ -103,6 +170,9 @@ class DoorStation(asyncio.DatagramProtocol):
                        + self._headers("BYE", call["id"], call["tag"], self._next_cseq(), call["to_tag"],
                                        extra="Content-Length: 0\n") + "\n")
         self._call = None
+        if self._audio:
+            self._audio.close()
+            self._audio = None
         if self._proc and self._proc.returncode is None:
             self._proc.kill()
         self._proc = None
@@ -146,12 +216,15 @@ class DoorStation(asyncio.DatagramProtocol):
 
     # ------------------------------------------------------------------ registration
     async def _register_loop(self) -> None:
+        misses = 0
         while True:
             self._send(f"REGISTER sip:{self.ctrl[0]} SIP/2.0\n"
                        + self._headers("REGISTER", self._reg_call_id, self._reg_tag, self._next_cseq(),
                                        extra="Expires: 60\nContent-Length: 0\n") + "\n")
             await asyncio.sleep(REGISTER_EVERY)
-            if not self.registered:
+            misses = 0 if self.registered else misses + 1
+            # ELAN can take a couple of minutes to answer after a restart: warn after ~5 min, then every ~30 min
+            if misses == 10 or (misses > 10 and misses % 60 == 0):
                 _LOGGER.warning("ELAN doorbell: the SIP Server at %s doesn't accept station %s. Set its Enrollment "
                                 "Mode to Open in Configurator (Messaging -> Communication Devices -> ELAN SIP "
                                 "Server) until a SIP Station appears", self.ctrl[0], self.station_id)
@@ -206,6 +279,9 @@ class DoorStation(asyncio.DatagramProtocol):
 
     async def _end_call(self) -> None:
         self._call = None
+        if self._audio:
+            self._audio.close()
+            self._audio = None
         proc, self._proc = self._proc, None
         if proc and proc.returncode is None:
             proc.terminate()
@@ -221,17 +297,37 @@ class DoorStation(asyncio.DatagramProtocol):
                    + self._headers("ACK", call["id"], call["tag"], call["cseq"], call["to_tag"],
                                    extra="Content-Length: 0\n") + "\n")
         _LOGGER.info("ELAN doorbell: answered")
-        media = sdp_media(response.split("\r\n\r\n", 1)[-1] if "\r\n\r\n" in response else response)
+        body = response.split("\r\n\r\n", 1)[-1] if "\r\n\r\n" in response else ""
+        _LOGGER.debug("ELAN doorbell: ELAN's answer SDP: %s", " | ".join(body.split("\r\n")))
+        media = sdp_media(body)
+        if media.get("audio"):
+            self._audio = RtpAudio(media["audio"])
+            try:
+                await self._audio.start()
+            except OSError as e:
+                _LOGGER.warning("ELAN doorbell: can't open audio port %s (%s)", RTP_AUDIO, e)
+                self._audio = None
         source = await self.media_source() if self.media_source else None
-        if not (source and self.ffmpeg and media):
+        if self._call is not call:
+            return                                   # hung up while we looked for the stream
+        if not (source and self.ffmpeg and (self._audio or media.get("video"))):
             _LOGGER.warning("ELAN doorbell: answered, but no doorbell stream to send")
             return
-        cmd = media_command(self.ffmpeg, source, media.get("audio"), media.get("video"))
-        _LOGGER.debug("ELAN doorbell media: %s", " ".join(cmd).split(" -i ")[0])
+        cmd = media_command(self.ffmpeg, source, self._audio is not None, media.get("video"))
+        _LOGGER.debug("ELAN doorbell media: audio %s, video %s", media.get("audio"), media.get("video"))
         self._proc = await asyncio.create_subprocess_exec(*cmd, stdin=asyncio.subprocess.DEVNULL,
-                                                          stdout=asyncio.subprocess.DEVNULL,
+                                                          stdout=asyncio.subprocess.PIPE,
                                                           stderr=asyncio.subprocess.PIPE)
         self._spawn(self._log_ffmpeg(self._proc))
+        if self._audio:
+            self._spawn(self._pipe_audio(self._proc, self._audio))
+
+    async def _pipe_audio(self, proc, audio: RtpAudio) -> None:
+        while True:
+            data = await proc.stdout.read(RtpAudio.FRAME * 4)
+            if not data:
+                return
+            audio.feed(data)
 
     async def _log_ffmpeg(self, proc) -> None:
         async for line in proc.stderr:
