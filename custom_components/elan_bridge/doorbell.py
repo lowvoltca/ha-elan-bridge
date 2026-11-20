@@ -12,7 +12,8 @@ from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
-from .nvr import PREFERRED_LIVE_WIDTH, _ffmpeg_binary, _protect_camera, _split_login, async_protect_streams
+from .nvr import (PREFERRED_LIVE_WIDTH, _ffmpeg_binary, _protect_api, _protect_camera, _split_login,
+                  async_protect_streams)
 from .sip_door import DoorStation
 
 _LOGGER = logging.getLogger(__name__)
@@ -60,10 +61,27 @@ async def async_setup_doorbell(hass: HomeAssistant, controller: str, device_id: 
         _LOGGER.debug("ELAN doorbell: sending %s", pick["label"])
         return _split_login(pick["url"])[0]
 
+    async def talkback_target() -> dict | None:
+        """Where and how the doorbell's speaker takes sound: Protect's talkback settings for the camera."""
+        cam, api = _protect_camera(hass, device), _protect_api(hass)
+        if cam is None or api is None:
+            return None
+        raw = await api.api_request_obj(f"cameras/{cam.id}")
+        tb, flags = raw.get("talkbackSettings") or {}, raw.get("featureFlags") or {}
+        if flags.get("hasSpeaker") is False or not raw.get("host"):
+            _LOGGER.debug("ELAN doorbell: %s has no speaker to talk through", name)
+            return None
+        if (tb.get("typeFmt") or "aac") != "aac":
+            _LOGGER.warning("ELAN doorbell: %s's speaker takes %s audio, which isn't supported yet", name, tb["typeFmt"])
+            return None
+        return {"host": raw["host"], "port": int(tb.get("bindPort") or 7004),
+                "rate": int(tb.get("samplingRate") or 22050), "channels": int(tb.get("channels") or 1),
+                "bitrate": int(tb.get("bitsPerSample") or 16) * 1000}
+
     from homeassistant.components.network import async_get_source_ip
 
     station = DoorStation(controller, await async_get_source_ip(hass), station_id, name,
-                          media_source=stream_url, ffmpeg=_ffmpeg_binary(hass))
+                          media_source=stream_url, ffmpeg=_ffmpeg_binary(hass), talkback=talkback_target)
     await station.start()
 
     on_unload(station.close)

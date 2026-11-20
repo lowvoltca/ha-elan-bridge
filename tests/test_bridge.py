@@ -31,6 +31,7 @@ const = load("const")
 client_mod = load("client")
 ml = load("media_logic")
 ev = load("events_logic")
+sip = load("sip_door")
 
 
 class StationIdTest(unittest.TestCase):
@@ -39,6 +40,38 @@ class StationIdTest(unittest.TestCase):
         self.assertEqual(len(ids), 200)
         for sid in ids:
             self.assertRegex(sid, r"^02[0-9A-F]{10}$")      # locally administered, never ELAN's F8572E prefix
+
+class SipAudioTest(unittest.TestCase):
+    def test_rtp_payload(self):
+        import struct
+        plain = struct.pack("!BBHII", 0x80, 0, 1, 160, 7) + b"\x11" * 160
+        self.assertEqual(sip.rtp_payload(plain), (0, b"\x11" * 160))
+        csrc_ext = (struct.pack("!BBHII", 0x91, 0x80 | 0, 1, 160, 7) + b"CSRC"
+                    + struct.pack("!HH", 0xBEDE, 1) + b"EXT!" + b"\x22" * 160)
+        self.assertEqual(sip.rtp_payload(csrc_ext), (0, b"\x22" * 160))
+        padded = struct.pack("!BBHII", 0xA0, 101, 1, 160, 7) + b"\x33" * 4 + b"\x00\x00\x03"
+        self.assertEqual(sip.rtp_payload(padded), (101, b"\x33" * 4))
+        self.assertEqual(sip.rtp_payload(b"junk"), (None, b""))
+
+    def test_elan_audio_reaches_callback(self):
+        import struct
+        audio = sip.RtpAudio(("127.0.0.1", 9))
+        got = []
+        audio.on_audio = got.append
+        audio.datagram_received(struct.pack("!BBHII", 0x80, 0, 1, 160, 7) + b"\x44" * 160, ("10.0.0.1", 8094))
+        audio.datagram_received(struct.pack("!BBHII", 0x80, 101, 2, 160, 7) + b"\x01\x0a\x00\xa0", ("10.0.0.1", 8094))
+        self.assertEqual(got, [b"\x44" * 160])          # DTMF isn't sound
+        self.assertEqual(audio.remote, ("10.0.0.1", 8094))   # replies follow ELAN's source
+        self.assertEqual(audio.received, 2)
+
+    def test_talkback_command(self):
+        cmd = sip.talkback_command("ffmpeg", {"host": "10.0.0.5", "port": 7004, "rate": 22050, "channels": 1,
+                                              "bitrate": 16000})
+        self.assertEqual(cmd[cmd.index("-i") + 1], "pipe:0")
+        self.assertEqual(cmd[cmd.index("-f") + 1], "mulaw")
+        self.assertIn("adts", cmd)
+        self.assertEqual(cmd[-1], "udp://10.0.0.5:7004?bitrate=24000")
+        self.assertNotIn("-nostdin", cmd)               # it reads the call's audio from stdin
 
 class EventsTest(unittest.TestCase):
     def test_classify_unifi_protect_names(self):

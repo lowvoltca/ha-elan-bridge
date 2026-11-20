@@ -70,6 +70,27 @@ def media_command(ffmpeg: str, source: str, audio: bool, video: tuple | None) ->
     return cmd
 
 
+def talkback_command(ffmpeg: str, target: dict) -> list:
+    """ffmpeg arguments that turn the call's 8 kHz mu-law (on stdin) into what the doorbell's speaker takes: ADTS AAC
+    over UDP to its talkback port, as Protect's own talkback does. target: host, port, rate, channels, bitrate."""
+    return [ffmpeg, "-hide_banner", "-nostats", "-loglevel", "info", "-fflags", "nobuffer", "-flags", "low_delay",
+            "-f", "mulaw", "-ar", "8000", "-ac", "1", "-i", "pipe:0", "-vn",
+            "-c:a", "aac", "-ac", str(target["channels"]), "-ar", str(target["rate"]), "-b:a", str(target["bitrate"]),
+            "-flush_packets", "1", "-f", "adts",
+            f"udp://{target['host']}:{target['port']}?bitrate={target['bitrate'] + 8000}"]
+
+
+def rtp_payload(data: bytes) -> tuple:
+    """(payload type, payload) of an RTP packet, or (None, b"") if it isn't one."""
+    if len(data) < 12 or data[0] >> 6 != 2:
+        return None, b""
+    off = 12 + 4 * (data[0] & 0x0F)
+    if data[0] & 0x10 and len(data) >= off + 4:                 # header extension
+        off += 4 + 4 * struct.unpack("!H", data[off + 2:off + 4])[0]
+    end = len(data) - (data[-1] if data[0] & 0x20 and data[-1] else 0)   # padding
+    return data[1] & 0x7F, data[off:end]
+
+
 class RtpAudio(asyncio.DatagramProtocol):
     """The call's audio, both ways on one port (symmetric RTP): 20 ms PCMU packets to ELAN, silence until the
     doorbell's sound arrives. Replies go wherever ELAN's own audio comes from, and both directions are counted."""
@@ -85,6 +106,7 @@ class RtpAudio(asyncio.DatagramProtocol):
         self.source = None
         self._seq, self._ts, self._ssrc = random.getrandbits(16), random.getrandbits(32), random.getrandbits(32)
         self._task = None
+        self.on_audio = None         # callable(mu-law bytes) for ELAN's audio (the person answering), or None
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
@@ -96,6 +118,9 @@ class RtpAudio(asyncio.DatagramProtocol):
 
     def datagram_received(self, data: bytes, addr) -> None:
         self.received += 1
+        pt, payload = rtp_payload(data)
+        if pt == 0 and payload and self.on_audio:      # 101 = DTMF (telephone-event): not used yet
+            self.on_audio(payload)
         if self.source is None:
             self.source = addr
             _LOGGER.debug("ELAN doorbell: ELAN's audio comes from %s:%s (sending to %s:%s)", *addr, *self.remote)
@@ -139,13 +164,14 @@ class DoorStation(asyncio.DatagramProtocol):
     """One SIP door station registered with one ELAN controller. ring() calls the touchpanels."""
 
     def __init__(self, controller: str, local_ip: str, station_id: str, name: str, media_source=None,
-                 ffmpeg: str | None = None) -> None:
+                 ffmpeg: str | None = None, talkback=None) -> None:
         self.ctrl = (controller, 5060)
         self.local = local_ip
         self.station_id = station_id
         self.name = name
         self.media_source = media_source     # async callable -> stream url (or None for no media)
         self.ffmpeg = ffmpeg
+        self.talkback = talkback             # async callable -> doorbell speaker target (see talkback_command) or None
         self.transport = None
         self.registered = False
         self._cseq = 0
@@ -153,7 +179,7 @@ class DoorStation(asyncio.DatagramProtocol):
         self._reg_tag = _tag()
         self._tasks: set = set()
         self._call = None                    # dict while a call is in progress
-        self._proc = None
+        self._procs: list = []               # ffmpeg processes of the call in progress
         self._audio = None
 
     # ------------------------------------------------------------------ lifecycle
@@ -173,9 +199,10 @@ class DoorStation(asyncio.DatagramProtocol):
         if self._audio:
             self._audio.close()
             self._audio = None
-        if self._proc and self._proc.returncode is None:
-            self._proc.kill()
-        self._proc = None
+        for proc in self._procs:
+            if proc.returncode is None:
+                proc.kill()
+        self._procs = []
         for task in list(self._tasks):
             task.cancel()
         if self.transport:
@@ -282,9 +309,11 @@ class DoorStation(asyncio.DatagramProtocol):
         if self._audio:
             self._audio.close()
             self._audio = None
-        proc, self._proc = self._proc, None
-        if proc and proc.returncode is None:
-            proc.terminate()
+        procs, self._procs = self._procs, []
+        for proc in procs:
+            if proc.returncode is None:
+                proc.terminate()
+        for proc in procs:
             try:
                 await asyncio.wait_for(proc.wait(), 5)
             except asyncio.TimeoutError:
@@ -315,12 +344,33 @@ class DoorStation(asyncio.DatagramProtocol):
             return
         cmd = media_command(self.ffmpeg, source, self._audio is not None, media.get("video"))
         _LOGGER.debug("ELAN doorbell media: audio %s, video %s", media.get("audio"), media.get("video"))
-        self._proc = await asyncio.create_subprocess_exec(*cmd, stdin=asyncio.subprocess.DEVNULL,
-                                                          stdout=asyncio.subprocess.PIPE,
-                                                          stderr=asyncio.subprocess.PIPE)
-        self._spawn(self._log_ffmpeg(self._proc))
+        proc = await asyncio.create_subprocess_exec(*cmd, stdin=asyncio.subprocess.DEVNULL,
+                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        self._procs.append(proc)
+        self._spawn(self._log_ffmpeg(proc, "door"))
         if self._audio:
-            self._spawn(self._pipe_audio(self._proc, self._audio))
+            self._spawn(self._pipe_audio(proc, self._audio))
+            await self._start_talkback(call)
+
+    async def _start_talkback(self, call: dict) -> None:
+        """The answering person's voice (ELAN's audio) to the doorbell's speaker."""
+        target = await self.talkback() if self.talkback else None
+        if not target or self._call is not call or not self._audio:
+            return
+        _LOGGER.debug("ELAN doorbell: talkback to %s:%s, AAC %s Hz", target["host"], target["port"], target["rate"])
+        proc = await asyncio.create_subprocess_exec(*talkback_command(self.ffmpeg, target),
+                                                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL,
+                                                    stderr=asyncio.subprocess.PIPE)
+        if self._call is not call:                   # hung up meanwhile
+            proc.kill()
+            return
+        self._procs.append(proc)
+        self._spawn(self._log_ffmpeg(proc, "talkback"))
+
+        def to_speaker(payload: bytes) -> None:
+            if proc.returncode is None and proc.stdin.transport.get_write_buffer_size() < 4000:   # ~0.5 s
+                proc.stdin.write(payload)
+        self._audio.on_audio = to_speaker
 
     async def _pipe_audio(self, proc, audio: RtpAudio) -> None:
         while True:
@@ -329,12 +379,12 @@ class DoorStation(asyncio.DatagramProtocol):
                 return
             audio.feed(data)
 
-    async def _log_ffmpeg(self, proc) -> None:
+    async def _log_ffmpeg(self, proc, label: str) -> None:
         async for line in proc.stderr:
-            _LOGGER.debug("ffmpeg: %s", line.decode(errors="replace").rstrip())
+            _LOGGER.debug("ffmpeg %s: %s", label, line.decode(errors="replace").rstrip())
         await proc.wait()
-        if proc.returncode not in (0, -15, 255) and self._proc is proc:
-            _LOGGER.warning("ELAN doorbell: the stream to ELAN stopped (ffmpeg exit %s)", proc.returncode)
+        if proc.returncode not in (0, -15, 255) and proc in self._procs:
+            _LOGGER.warning("ELAN doorbell: the %s stream stopped (ffmpeg exit %s)", label, proc.returncode)
 
     # ------------------------------------------------------------------ incoming
     def datagram_received(self, data: bytes, addr) -> None:
