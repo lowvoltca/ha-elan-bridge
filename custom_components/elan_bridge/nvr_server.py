@@ -45,7 +45,10 @@ GOP = 5
 # ended" and the controller reconnects in a loop, so pieces with bigger keyframes (Protect 4 MP+) are re-encoded.
 KEY_LIMIT = 200_000
 AUD = b"\x00\x00\x00\x01\x09\xf0"     # access unit delimiter: keep-alive while a piece is fetched
-TYPE_NAME = {"motion": "motion", "person": "ivsintrusion_person", "vehicle": "ivsintrusion_vehicle"}
+# ELAN knows only these kinds (anything else is dropped). It has no doorbell kind, so rings use the otherwise
+# unused "entered" intrusion kind and get their own mark on the timeline.
+TYPE_NAME = {"motion": "motion", "person": "ivsintrusion_person", "vehicle": "ivsintrusion_vehicle",
+             "ring": "ivsintrusion_entered"}
 FF_SPEED = {0: 1, 1: 2, 2: 4, 3: 8, 4: 16}
 STREAM_PREFIXES = ("getpbthumbnail", "gethdpbstream", "getpbstream")
 IMAGE_PREFIXES = ("timeline?cmd=jpeg", "snap")

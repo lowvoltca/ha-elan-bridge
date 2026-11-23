@@ -5,7 +5,7 @@ Everything goes through Home Assistant's own UniFi Protect integration, so no Pr
 - live view: the camera's Protect RTSP link (enable RTSP for at least one stream in Protect);
 - recordings: Camera.get_video (Protect export), re-encoded with ffmpeg when keyframes are too big for the
   controller (Protect 4 MP+ streams) or the camera records H.265;
-- timeline events: recorder history of the camera's Person / Vehicle / Motion binary sensors;
+- timeline events: recorder history of the camera's Person / Vehicle / Motion / Doorbell binary sensors;
 - thumbnails: Camera.get_snapshot at that time, shrunk to 640 px.
 """
 
@@ -35,7 +35,8 @@ _LOGGER = logging.getLogger(__name__)
 
 FIRST_ONVIF_PORT = 8001
 RETENTION_DAYS = 30
-SENSOR_KIND = {"Person Detected": "person", "Vehicle Detected": "vehicle", "Motion Detected": "motion"}
+SENSOR_KIND = {"Person Detected": "person", "Vehicle Detected": "vehicle", "Motion Detected": "motion",
+               "Doorbell Detected": "ring"}
 PREFERRED_LIVE_WIDTH = 1280       # live view: the largest Protect RTSP stream up to this width (ELAN plays 960x720
                                   # doorbell streams live but not 1600x1200)
 

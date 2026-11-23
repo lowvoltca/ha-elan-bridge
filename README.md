@@ -68,6 +68,8 @@ IP address.
    stream address and every camera reports an authorization error.
 3. Pick each camera on an EL-NVR channel.
 
+The timeline marks Protect's motion, person and vehicle detections, and doorbell rings. ELAN has no doorbell event type, so rings use its intrusion type and get their own mark.
+
 A second page in the dialog sets which Protect stream each live view uses. ELAN plays about 720p or smaller live.
 
 **Doorbell (UniFi Protect).** Pick the doorbell in the dialog. Home Assistant calls ELAN's touchpanels as a SIP

@@ -32,6 +32,8 @@ client_mod = load("client")
 ml = load("media_logic")
 ev = load("events_logic")
 sip = load("sip_door")
+nvr_mp4 = load("nvr_mp4")
+nvrs = load("nvr_server")
 
 
 class StationIdTest(unittest.TestCase):
@@ -79,6 +81,22 @@ class SipAudioTest(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("-c:a") + 1], "libopus")
         self.assertEqual(cmd[cmd.index("-ar", cmd.index("-c:a")) + 1], "48000")   # 22050 isn't an Opus rate
         self.assertEqual(cmd[-2:], ["rtp", "rtp://10.0.0.5:7004"])
+
+
+class NvrTimelineTest(unittest.TestCase):
+    def test_doorbell_ring_gets_its_own_kind(self):
+        import json
+        import time as _t
+        now = int(_t.time())
+        source = types.SimpleNamespace(retention_days=1,
+                                       detections=lambda key, s, e: [(now - 60, "ring"), (now - 30, "person")])
+        fake = types.SimpleNamespace(source=source, used=lambda: [(0, {"key": "cam"})])
+        fake._window = lambda s, e: nvrs.NvrServer._window(fake, s, e)
+        out = json.loads(nvrs.NvrServer.timeline(fake, now - 600, now))
+        kinds = {o["type"] for o in out if o["type"] != "rec"}
+        self.assertEqual(kinds, {"ivsintrusion_entered", "ivsintrusion_person"})
+        self.assertTrue(all(isinstance(v, str) for o in out for v in o.values()))   # ELAN needs strings
+
 
 class EventsTest(unittest.TestCase):
     def test_classify_unifi_protect_names(self):
