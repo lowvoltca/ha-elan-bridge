@@ -70,14 +70,24 @@ def media_command(ffmpeg: str, source: str, audio: bool, video: tuple | None) ->
     return cmd
 
 
+OPUS_RATES = (8000, 12000, 16000, 24000, 48000)
+TALKBACK_CODECS = ("aac", "opus")
+
+
 def talkback_command(ffmpeg: str, target: dict) -> list:
-    """ffmpeg arguments that turn the call's 8 kHz mu-law (on stdin) into what the doorbell's speaker takes: ADTS AAC
-    over UDP to its talkback port, as Protect's own talkback does. target: host, port, rate, channels, bitrate."""
-    return [ffmpeg, "-hide_banner", "-nostats", "-loglevel", "info", "-fflags", "nobuffer", "-flags", "low_delay",
-            "-f", "mulaw", "-ar", "8000", "-ac", "1", "-i", "pipe:0", "-vn",
-            "-c:a", "aac", "-ac", str(target["channels"]), "-ar", str(target["rate"]), "-b:a", str(target["bitrate"]),
-            "-flush_packets", "1", "-f", "adts",
-            f"udp://{target['host']}:{target['port']}?bitrate={target['bitrate'] + 8000}"]
+    """ffmpeg arguments that turn the call's 8 kHz mu-law (on stdin) into what the doorbell's speaker takes, sent to
+    its talkback port the way Protect expects: AAC as an ADTS stream over UDP, Opus as RTP.
+    target: host, port, codec ("aac" | "opus"), rate, channels, bitrate."""
+    head = [ffmpeg, "-hide_banner", "-nostats", "-loglevel", "info", "-fflags", "nobuffer", "-flags", "low_delay",
+            "-f", "mulaw", "-ar", "8000", "-ac", "1", "-i", "pipe:0", "-vn"]
+    host, port, bitrate = target["host"], target["port"], target["bitrate"]
+    if target.get("codec", "aac") == "opus":
+        rate = target["rate"] if target["rate"] in OPUS_RATES else 48000
+        return head + ["-c:a", "libopus", "-application", "voip", "-frame_duration", "20",
+                       "-ac", str(target["channels"]), "-ar", str(rate), "-b:a", str(max(bitrate, 16000)),
+                       "-flush_packets", "1", "-f", "rtp", f"rtp://{host}:{port}"]
+    return head + ["-c:a", "aac", "-ac", str(target["channels"]), "-ar", str(target["rate"]), "-b:a", str(bitrate),
+                   "-flush_packets", "1", "-f", "adts", f"udp://{host}:{port}?bitrate={bitrate + 8000}"]
 
 
 def rtp_payload(data: bytes) -> tuple:
@@ -357,7 +367,8 @@ class DoorStation(asyncio.DatagramProtocol):
         target = await self.talkback() if self.talkback else None
         if not target or self._call is not call or not self._audio:
             return
-        _LOGGER.debug("ELAN doorbell: talkback to %s:%s, AAC %s Hz", target["host"], target["port"], target["rate"])
+        _LOGGER.debug("ELAN doorbell: talkback to %s:%s, %s %s Hz", target["host"], target["port"],
+                      target.get("codec", "aac").upper(), target["rate"])
         proc = await asyncio.create_subprocess_exec(*talkback_command(self.ffmpeg, target),
                                                     stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL,
                                                     stderr=asyncio.subprocess.PIPE)

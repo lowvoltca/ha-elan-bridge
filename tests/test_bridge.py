@@ -73,6 +73,13 @@ class SipAudioTest(unittest.TestCase):
         self.assertEqual(cmd[-1], "udp://10.0.0.5:7004?bitrate=24000")
         self.assertNotIn("-nostdin", cmd)               # it reads the call's audio from stdin
 
+    def test_talkback_command_opus(self):
+        cmd = sip.talkback_command("ffmpeg", {"host": "10.0.0.5", "port": 7004, "codec": "opus", "rate": 22050,
+                                              "channels": 1, "bitrate": 16000})
+        self.assertEqual(cmd[cmd.index("-c:a") + 1], "libopus")
+        self.assertEqual(cmd[cmd.index("-ar", cmd.index("-c:a")) + 1], "48000")   # 22050 isn't an Opus rate
+        self.assertEqual(cmd[-2:], ["rtp", "rtp://10.0.0.5:7004"])
+
 class EventsTest(unittest.TestCase):
     def test_classify_unifi_protect_names(self):
         c = ev.classify

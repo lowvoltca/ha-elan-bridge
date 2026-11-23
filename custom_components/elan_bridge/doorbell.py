@@ -14,7 +14,7 @@ from homeassistant.util import dt as dt_util
 from .const import DOMAIN
 from .nvr import (PREFERRED_LIVE_WIDTH, _ffmpeg_binary, _protect_api, _protect_camera, _split_login,
                   async_protect_streams)
-from .sip_door import DoorStation
+from .sip_door import TALKBACK_CODECS, DoorStation
 
 _LOGGER = logging.getLogger(__name__)
 SERVICE_RING = "ring_doorbell"
@@ -71,10 +71,11 @@ async def async_setup_doorbell(hass: HomeAssistant, controller: str, device_id: 
         if flags.get("hasSpeaker") is False or not raw.get("host"):
             _LOGGER.debug("ELAN doorbell: %s has no speaker to talk through", name)
             return None
-        if (tb.get("typeFmt") or "aac") != "aac":
-            _LOGGER.warning("ELAN doorbell: %s's speaker takes %s audio, which isn't supported yet", name, tb["typeFmt"])
+        codec = (tb.get("typeFmt") or "aac").lower()
+        if codec not in TALKBACK_CODECS:
+            _LOGGER.warning("ELAN doorbell: %s's speaker takes %s audio, which isn't supported yet", name, codec)
             return None
-        return {"host": raw["host"], "port": int(tb.get("bindPort") or 7004),
+        return {"host": raw["host"], "port": int(tb.get("bindPort") or 7004), "codec": codec,
                 "rate": int(tb.get("samplingRate") or 22050), "channels": int(tb.get("channels") or 1),
                 "bitrate": int(tb.get("bitsPerSample") or 16) * 1000}
 
